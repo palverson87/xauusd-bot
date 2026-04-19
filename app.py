@@ -51,6 +51,12 @@ ORANGE = "#ffa657"
 TEAL   = "#39d353"
 
 
+def _hex_rgba(hex_color, alpha):
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  DATA
 # ══════════════════════════════════════════════════════════════════════════════
@@ -593,7 +599,7 @@ def _perf_chart(title, x, y, colors, text_vals=None, kind="bar"):
         fig.add_hline(y=50, line_color=DIM, line_dash="dash", line_width=1)
     else:
         fig.add_trace(go.Scatter(x=x, y=y, line=dict(color=colors, width=2),
-                                  fill="tozeroy", fillcolor=f"{colors}22"))
+                                  fill="tozeroy", fillcolor=_hex_rgba(colors, 0.13)))
         fig.add_hline(y=10000, line_color=DIM, line_dash="dash", line_width=1)
 
     fig.update_layout(
@@ -863,7 +869,7 @@ def build_paper_trades_tab():
         eq_fig.add_trace(go.Scatter(
             x=dates, y=ph.equity, name="Equity",
             line=dict(color=eq_col, width=2),
-            fill="tozeroy", fillcolor=f"{eq_col}22",
+            fill="tozeroy", fillcolor=_hex_rgba(eq_col, 0.13),
         ))
         eq_fig.add_hline(y=ph.base_value, line_color=DIM,
                           line_dash="dash", line_width=1)
