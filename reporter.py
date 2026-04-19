@@ -17,7 +17,10 @@ import db
 
 log = logging.getLogger(__name__)
 
-REPORTS_DIR = Path(__file__).parent / "reports"
+# Use /app when it exists (Railway Volume mount); fall back to script directory locally
+_RAILWAY    = Path("/app")
+_BASE_DIR   = _RAILWAY if _RAILWAY.exists() else Path(__file__).parent
+REPORTS_DIR = _BASE_DIR / "reports"
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 BG    = "#0d1117"

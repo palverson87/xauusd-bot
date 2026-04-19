@@ -6,8 +6,12 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DB_PATH      = Path(__file__).parent / "signals.db"
-WEIGHTS_PATH = Path(__file__).parent / "weights.json"
+# Use /app when it exists (Railway Volume mount); fall back to script directory locally
+_RAILWAY = Path("/app")
+BASE_DIR  = _RAILWAY if _RAILWAY.exists() else Path(__file__).parent
+
+DB_PATH      = BASE_DIR / "signals.db"
+WEIGHTS_PATH = BASE_DIR / "weights.json"
 
 INDICATOR_COLS = {
     "RSI":        "rsi_vote",
