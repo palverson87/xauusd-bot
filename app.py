@@ -12,6 +12,7 @@ import yfinance as yf
 
 import db
 import tracker
+from alpaca_trader import trader
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s — %(message)s")
@@ -768,6 +769,240 @@ def build_performance_tab():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  PAPER TRADES TAB
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_paper_trades_tab():
+    if not trader.enabled:
+        return _panel([
+            html.P("Alpaca paper trading is not configured.",
+                   style={"color": DIM, "fontFamily": "monospace", "fontSize": "13px",
+                          "margin": "0 0 8px"}),
+            html.P("Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables "
+                   "and restart the bot.",
+                   style={"color": DIM, "fontFamily": "monospace", "fontSize": "12px",
+                          "margin": 0}),
+        ])
+
+    # ── Fetch live data from Alpaca ────────────────────────────────────────
+    try:
+        acct       = trader.account()
+        positions  = trader.positions()
+        ph         = trader.portfolio_history(period="1M", timeframe="1D")
+        gold_sym   = trader.gold_symbol()
+    except Exception as exc:
+        return _panel([html.P(f"Alpaca API error: {exc}",
+                               style={"color": RED, "fontFamily": "monospace",
+                                      "fontSize": "13px"})])
+
+    equity       = float(acct.equity)
+    cash         = float(acct.cash)
+    buying_power = float(acct.buying_power)
+    last_eq      = float(acct.last_equity)
+    daily_pnl    = equity - last_eq
+    daily_pnl_pct = daily_pnl / last_eq * 100 if last_eq else 0
+    dp_col        = GREEN if daily_pnl >= 0 else RED
+
+    # ── Trade history from DB ──────────────────────────────────────────────
+    trades     = db.get_trades(50)
+    trade_stats = db.get_trade_stats()
+
+    # Compute stats
+    wins   = next((r["n"]        for r in trade_stats if r["outcome"] == "win"),  0)
+    losses = next((r["n"]        for r in trade_stats if r["outcome"] == "loss"), 0)
+    total_closed = wins + losses
+    win_rate = wins / total_closed * 100 if total_closed else None
+    total_return = (equity / 100_000 - 1) * 100  # assume $100k paper start
+
+    # Avg R:R  (avg_win / avg_loss)
+    avg_win  = next((abs(r["avg_pnl"]) for r in trade_stats if r["outcome"] == "win"),  None)
+    avg_loss = next((abs(r["avg_pnl"]) for r in trade_stats if r["outcome"] == "loss"), None)
+    rr_ratio = avg_win / avg_loss if (avg_win and avg_loss) else None
+
+    def stat_card(title, value, color=TEXT, sub=None):
+        return html.Div([
+            html.P(title, style={"margin": 0, "color": DIM, "fontSize": "10px",
+                                  "textTransform": "uppercase", "letterSpacing": "0.08em",
+                                  "fontFamily": "monospace"}),
+            html.P(value, style={"margin": "4px 0 0", "color": color, "fontSize": "18px",
+                                  "fontWeight": "700", "fontFamily": "monospace"}),
+            *([] if not sub else [html.P(sub, style={"margin": "2px 0 0", "color": DIM,
+                                                       "fontSize": "10px",
+                                                       "fontFamily": "monospace"})]),
+        ], style={"background": PANEL, "border": f"1px solid {BORDER}",
+                   "borderRadius": "8px", "padding": "12px 16px",
+                   "flex": "1", "minWidth": "130px"})
+
+    stats_row = html.Div([
+        stat_card("Equity",       f"${equity:,.2f}", TEXT),
+        stat_card("Cash",         f"${cash:,.2f}",   TEXT),
+        stat_card("Buying Power", f"${buying_power:,.2f}", TEXT),
+        stat_card("Daily P&L",    f"{'+'if daily_pnl>=0 else ''}{daily_pnl:,.2f}",
+                  dp_col, sub=f"{'+'if daily_pnl_pct>=0 else ''}{daily_pnl_pct:.2f}%"),
+        stat_card("Total Return", f"{'+'if total_return>=0 else ''}{total_return:.2f}%",
+                  GREEN if total_return >= 0 else RED),
+        stat_card("Win Rate",
+                  f"{win_rate:.1f}%" if win_rate is not None else "–",
+                  GREEN if (win_rate or 0) >= 50 else RED,
+                  sub=f"{wins}W / {losses}L  ({total_closed} closed)"),
+        stat_card("Avg R:R",
+                  f"1 : {rr_ratio:.2f}" if rr_ratio else "–",
+                  GREEN if (rr_ratio or 0) >= 1.5 else YELLOW,
+                  sub="Target: 1 : 2.0"),
+        stat_card("Gold Symbol", gold_sym, BLUE,
+                  sub="Paper trading"),
+    ], style={"display": "flex", "flexWrap": "wrap", "gap": "10px",
+               "marginBottom": "12px"})
+
+    # ── Equity curve ───────────────────────────────────────────────────────
+    eq_fig = go.Figure()
+    if ph and ph.equity:
+        from datetime import datetime as _dt
+        dates = [_dt.utcfromtimestamp(t).strftime("%Y-%m-%d") for t in ph.timestamp]
+        eq_col = GREEN if ph.equity[-1] >= ph.equity[0] else RED
+        eq_fig.add_trace(go.Scatter(
+            x=dates, y=ph.equity, name="Equity",
+            line=dict(color=eq_col, width=2),
+            fill="tozeroy", fillcolor=f"{eq_col}22",
+        ))
+        eq_fig.add_hline(y=ph.base_value, line_color=DIM,
+                          line_dash="dash", line_width=1)
+    eq_fig.update_layout(
+        title=dict(text="Paper Account Equity", font=dict(color=DIM, size=11,
+                                                            family="monospace"), x=0.01),
+        paper_bgcolor=BG, plot_bgcolor=PANEL, height=220,
+        font=dict(color=DIM, family="monospace", size=10),
+        margin=dict(l=50, r=20, t=36, b=30), showlegend=False,
+        xaxis=dict(gridcolor=BORDER, zeroline=False),
+        yaxis=dict(gridcolor=BORDER, zeroline=False, tickprefix="$"),
+    )
+
+    # ── Open positions ─────────────────────────────────────────────────────
+    pos_th = lambda t: html.Th(t, style={"color": DIM, "fontFamily": "monospace",
+                                          "fontSize": "10px", "padding": "6px 12px",
+                                          "textTransform": "uppercase",
+                                          "letterSpacing": "0.06em",
+                                          "borderBottom": f"1px solid {BORDER}",
+                                          "textAlign": "right" if t != "Symbol" else "left"})
+    def pos_td(val, color=TEXT, align="right"):
+        return html.Td(val, style={"color": color, "fontFamily": "monospace",
+                                    "fontSize": "12px", "padding": "7px 12px",
+                                    "textAlign": align})
+
+    pos_rows = []
+    for p in positions:
+        pnl     = float(p.unrealized_pl)
+        pnl_pct = float(p.unrealized_plpc) * 100
+        pc      = GREEN if pnl >= 0 else RED
+        pos_rows.append(html.Tr([
+            pos_td(p.symbol, TEXT, "left"),
+            pos_td(p.side.upper(), GREEN if p.side == "long" else RED),
+            pos_td(p.qty),
+            pos_td(f"${float(p.avg_entry_price):,.2f}"),
+            pos_td(f"${float(p.current_price):,.2f}"),
+            pos_td(f"{'+'if pnl>=0 else ''}{pnl:,.2f}", pc),
+            pos_td(f"{'+'if pnl_pct>=0 else ''}{pnl_pct:.2f}%", pc),
+        ]))
+
+    open_positions = _panel([
+        _label("Open Positions"),
+        html.Table([
+            html.Thead(html.Tr([pos_th(h) for h in
+                                ["Symbol", "Side", "Qty", "Entry", "Current",
+                                 "Unreal. P&L", "P&L %"]])),
+            html.Tbody(pos_rows if pos_rows else [
+                html.Tr(html.Td("No open positions", colSpan=7,
+                                style={"color": DIM, "padding": "14px",
+                                       "textAlign": "center",
+                                       "fontFamily": "monospace", "fontSize": "12px"}))
+            ]),
+        ], style={"width": "100%", "borderCollapse": "collapse"}),
+    ], {"marginBottom": "12px"})
+
+    # ── Trade history ──────────────────────────────────────────────────────
+    th_style = {"color": DIM, "fontFamily": "monospace", "fontSize": "10px",
+                "padding": "6px 12px", "textTransform": "uppercase",
+                "letterSpacing": "0.06em",
+                "borderBottom": f"1px solid {BORDER}", "textAlign": "center"}
+
+    hist_rows = []
+    for t in trades:
+        oc = t["outcome"] or "open"
+        oc_col = (GREEN if oc == "win" else RED if oc == "loss"
+                  else YELLOW if oc == "open" else DIM)
+        dir_col = GREEN if t["direction"] == "BUY" else RED
+        pnl_str = (f"{t['pnl_pct']:+.2f}%" if t["pnl_pct"] is not None else "–")
+        pnl_col = (GREEN if (t["pnl_pct"] or 0) > 0
+                   else RED if (t["pnl_pct"] or 0) < 0 else DIM)
+        hist_rows.append(html.Tr([
+            html.Td(t["opened_at"][:16] if t["opened_at"] else "–",
+                    style={"color": DIM, "fontFamily": "monospace", "fontSize": "11px",
+                           "padding": "6px 12px"}),
+            html.Td(t["symbol"],
+                    style={"color": TEXT, "fontFamily": "monospace", "fontSize": "11px",
+                           "padding": "6px 12px", "textAlign": "center"}),
+            html.Td(t["direction"],
+                    style={"color": dir_col, "fontFamily": "monospace",
+                           "fontSize": "11px", "fontWeight": "700",
+                           "padding": "6px 12px", "textAlign": "center"}),
+            html.Td(f"${t['entry_price']:,.2f}" if t["entry_price"] else "–",
+                    style={"color": TEXT, "fontFamily": "monospace", "fontSize": "11px",
+                           "padding": "6px 12px", "textAlign": "right"}),
+            html.Td(f"${t['stop_loss']:,.2f}",
+                    style={"color": RED, "fontFamily": "monospace", "fontSize": "11px",
+                           "padding": "6px 12px", "textAlign": "right"}),
+            html.Td(f"${t['take_profit']:,.2f}",
+                    style={"color": GREEN, "fontFamily": "monospace", "fontSize": "11px",
+                           "padding": "6px 12px", "textAlign": "right"}),
+            html.Td(f"{t['score']}/5",
+                    style={"color": BLUE, "fontFamily": "monospace", "fontSize": "11px",
+                           "padding": "6px 12px", "textAlign": "center"}),
+            html.Td(t["session"],
+                    style={"color": DIM, "fontFamily": "monospace", "fontSize": "11px",
+                           "padding": "6px 12px"}),
+            html.Td(pnl_str, style={"color": pnl_col, "fontFamily": "monospace",
+                                     "fontSize": "11px", "fontWeight": "600",
+                                     "padding": "6px 12px", "textAlign": "right"}),
+            html.Td(oc.upper(), style={"color": oc_col, "fontFamily": "monospace",
+                                        "fontSize": "11px", "fontWeight": "600",
+                                        "padding": "6px 12px", "textAlign": "center"}),
+        ], style={"borderBottom": f"1px solid {BORDER}22"}))
+
+    trade_history = _panel([
+        _label("Trade History (last 50)"),
+        html.Table([
+            html.Thead(html.Tr([
+                html.Th("Opened",     style=th_style),
+                html.Th("Symbol",     style=th_style),
+                html.Th("Direction",  style=th_style),
+                html.Th("Entry",      style=th_style),
+                html.Th("Stop Loss",  style=th_style),
+                html.Th("Take Profit",style=th_style),
+                html.Th("Score",      style=th_style),
+                html.Th("Session",    style=th_style),
+                html.Th("P&L",        style=th_style),
+                html.Th("Outcome",    style=th_style),
+            ])),
+            html.Tbody(hist_rows if hist_rows else [
+                html.Tr(html.Td("No trades placed yet — score 5/5 required to execute",
+                                colSpan=10,
+                                style={"color": DIM, "padding": "16px",
+                                       "textAlign": "center",
+                                       "fontFamily": "monospace", "fontSize": "12px"}))
+            ]),
+        ], style={"width": "100%", "borderCollapse": "collapse"}),
+    ])
+
+    return html.Div([
+        stats_row,
+        dcc.Graph(figure=eq_fig, config={"displayModeBar": False},
+                  style={"marginBottom": "12px"}),
+        open_positions,
+        trade_history,
+    ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  APP
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -808,9 +1043,11 @@ app.layout = html.Div([
 
     # Tabs
     dcc.Tabs(id="tabs", value="analysis", children=[
-        dcc.Tab(label="Analysis",    value="analysis",
+        dcc.Tab(label="Analysis",     value="analysis",
                 style=TAB_STYLE, selected_style=TAB_SELECTED),
-        dcc.Tab(label="Performance", value="performance",
+        dcc.Tab(label="Performance",  value="performance",
+                style=TAB_STYLE, selected_style=TAB_SELECTED),
+        dcc.Tab(label="Paper Trades", value="paper_trades",
                 style=TAB_STYLE, selected_style=TAB_SELECTED),
     ], style={"marginBottom": "0"}),
 
@@ -836,6 +1073,12 @@ def render_tab(tab, _n, period_value):
     if tab == "performance":
         try:
             return build_performance_tab(), ""
+        except Exception as exc:
+            return "", _err(exc)
+
+    if tab == "paper_trades":
+        try:
+            return build_paper_trades_tab(), ""
         except Exception as exc:
             return "", _err(exc)
 
@@ -866,6 +1109,21 @@ def render_tab(tab, _n, period_value):
             )
         except Exception as log_exc:
             app.logger.warning("Signal log failed: %s", log_exc)
+
+        # ── Auto-trade via Alpaca (score 5 only, non-Asian sessions) ──────
+        try:
+            trade_msg, order_id = trader.maybe_trade(
+                score=score,
+                direction=verdict[0],
+                price=float(df_main.iloc[-1]["Close"]),
+                session=sess_name,
+            )
+            if order_id:
+                app.logger.info("Trade executed: %s  order=%s", trade_msg, order_id)
+            elif "keys not set" not in trade_msg:
+                app.logger.info("Trade check: %s", trade_msg)
+        except Exception as trade_exc:
+            app.logger.warning("Trade execution failed: %s", trade_exc)
 
         content = html.Div([
             html.Div([build_session_panel(), build_dxy_panel(df_uup),

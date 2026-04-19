@@ -51,6 +51,24 @@ def init_db():
             interval      TEXT,
             logged_at     TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
         );
+        CREATE TABLE IF NOT EXISTS trades (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            alpaca_order_id  TEXT    UNIQUE,
+            symbol           TEXT    NOT NULL,
+            direction        TEXT    NOT NULL,   -- BUY | SELL
+            qty              REAL    NOT NULL,
+            entry_price      REAL,
+            stop_loss        REAL    NOT NULL,
+            take_profit      REAL    NOT NULL,
+            score            INTEGER NOT NULL,
+            session          TEXT    NOT NULL,
+            status           TEXT    DEFAULT 'open',
+            exit_price       REAL,
+            pnl_pct          REAL,
+            outcome          TEXT,               -- win | loss | cancelled | open
+            opened_at        TEXT    DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+            closed_at        TEXT
+        );
         CREATE TABLE IF NOT EXISTS outcomes (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             signal_id     INTEGER NOT NULL REFERENCES signals(id),
@@ -250,3 +268,57 @@ def recalculate_weights():
             w[name] = round(max(0.3, min(2.0, acc * 2.0)), 3)
     save_weights(w)
     return w
+
+
+# ── Trade log (Alpaca paper trades) ───────────────────────────────────────────
+
+def log_trade(alpaca_order_id, symbol, direction, qty,
+              entry_price, stop_loss, take_profit, score, session):
+    with _conn() as c:
+        c.execute(
+            """INSERT OR IGNORE INTO trades
+               (alpaca_order_id, symbol, direction, qty, entry_price,
+                stop_loss, take_profit, score, session)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (alpaca_order_id, symbol, direction, qty, entry_price,
+             stop_loss, take_profit, score, session),
+        )
+
+
+def get_open_trades():
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM trades WHERE outcome IS NULL OR outcome = 'open'"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_trades(limit=50):
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_trade_outcome(trade_id, exit_price, pnl_pct, outcome, status):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    with _conn() as c:
+        c.execute(
+            """UPDATE trades
+               SET exit_price=?, pnl_pct=?, outcome=?, status=?, closed_at=?
+               WHERE id=?""",
+            (exit_price, pnl_pct, outcome, status, now, trade_id),
+        )
+
+
+def get_trade_stats():
+    with _conn() as c:
+        rows = c.execute(
+            """SELECT outcome, COUNT(*) AS n,
+                      AVG(pnl_pct) AS avg_pnl,
+                      SUM(pnl_pct) AS total_pnl
+               FROM trades WHERE outcome != 'open' AND outcome IS NOT NULL
+               GROUP BY outcome"""
+        ).fetchall()
+    return [dict(r) for r in rows]

@@ -8,6 +8,7 @@ import yfinance as yf
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import db
+from alpaca_trader import trader
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,16 @@ def check_outcomes():
             log.error("Weight recalc failed: %s", exc)
 
 
+def sync_trades():
+    """Sync Alpaca order outcomes into the local trades table."""
+    if not trader.enabled:
+        return
+    try:
+        trader.sync_open_trades()
+    except Exception as exc:
+        log.error("Trade sync failed: %s", exc)
+
+
 def weekly_report():
     try:
         import reporter
@@ -63,6 +74,7 @@ def start():
 
     _scheduler = BackgroundScheduler(daemon=True, timezone="UTC")
     _scheduler.add_job(check_outcomes, "interval", minutes=30,   id="outcomes")
+    _scheduler.add_job(sync_trades,    "interval", minutes=10,   id="trade_sync")
     _scheduler.add_job(weekly_report,  "cron",
                        day_of_week="sun", hour=23, minute=59,    id="weekly_pdf")
     _scheduler.start()
