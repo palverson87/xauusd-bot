@@ -22,7 +22,7 @@ MAX_POSITIONS   = 2
 MAX_DAILY_LOSS  = 2.0   # %
 STOP_LOSS_PCT   = 0.8   # %
 TAKE_PROFIT_PCT = 1.6   # %
-SCORE_THRESHOLD = 5     # minimum score to actually execute
+SCORE_THRESHOLD = 4     # minimum score to actually execute
 
 
 class AlpacaTrader:
@@ -112,7 +112,7 @@ class AlpacaTrader:
         """
         Evaluate all conditions and place an order if everything passes.
         Returns (status_message: str, order_id: str | None).
-        Score 4 = log only; score 5 = execute.
+        Score 3 = log only; score 4-5 = execute.
         """
         if not self.enabled:
             return "Alpaca keys not set — trading disabled", None
@@ -122,14 +122,14 @@ class AlpacaTrader:
         if v_direction not in ("BUY", "SELL"):
             return "Neutral — no trade", None
 
-        if score < 4:
+        if score < 3:
             return f"Score {score}/5 — below threshold", None
 
-        if score == 4:
-            log.info("Score 4/5: signal logged, not executed (threshold is 5)")
-            return f"Score 4/5: signal noted — waiting for score 5 to execute", None
+        if score == 3:
+            log.info("Score 3/5: signal logged, not executed")
+            return "Score 3/5: signal noted — below execution threshold", None
 
-        # score == 5 from here
+        # score >= 4 from here — execute
         if session == "Asian":
             return "Skipped: Asian session (low liquidity)", None
 
