@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+
+# Runtime data (ephemeral — use Railway Volume for persistence)
+signals.db
+weights.json
+reports/
+*.pdf
+
+# Local env
+.env
