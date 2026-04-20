@@ -13,6 +13,7 @@ import yfinance as yf
 
 import db
 import tracker
+import oanda_feed
 from alpaca_trader import trader
 
 logging.basicConfig(level=logging.INFO,
@@ -124,19 +125,36 @@ def calculate_indicators(df):
 
 
 def fetch_all(period, interval):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-        f_main = ex.submit(_fetch_raw, TICKER,   period, interval)
-        f_15m  = ex.submit(_fetch_raw, TICKER,   "3d",   "15m")
-        f_1h   = ex.submit(_fetch_raw, TICKER,   "7d",   "1h")
-        f_4hr  = ex.submit(_fetch_raw, TICKER,   "60d",  "1h")
-        f_1d   = ex.submit(_fetch_raw, TICKER,   "1y",   "1d")
-        f_uup  = ex.submit(_fetch_raw, DXY_ETF,  "30d",  "1d")
+    # Always fetch DXY/UUP from yfinance (Oanda doesn't carry ETFs)
+    df_uup = _fetch_raw(DXY_ETF, "30d", "1d")
+
+    if oanda_feed.enabled():
+        try:
+            raw_main, raw_15m, raw_1h, raw_4h, raw_1d = \
+                oanda_feed.fetch_all_oanda(f"{period}|{interval}")
+            # Oanda gives native 4H — no resampling needed
+            df_main = calculate_indicators(raw_main)
+            df_15m  = calculate_indicators(raw_15m)
+            df_1h   = calculate_indicators(raw_1h)
+            df_4h   = calculate_indicators(raw_4h)
+            df_1d   = calculate_indicators(raw_1d)
+            return df_main, df_15m, df_1h, df_4h, df_1d, df_uup
+        except Exception as exc:
+            log.warning("Oanda fetch failed — falling back to yfinance: %s", exc)
+
+    # yfinance fallback
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        f_main = ex.submit(_fetch_raw, TICKER, period, interval)
+        f_15m  = ex.submit(_fetch_raw, TICKER, "3d",   "15m")
+        f_1h   = ex.submit(_fetch_raw, TICKER, "7d",   "1h")
+        f_4hr  = ex.submit(_fetch_raw, TICKER, "60d",  "1h")
+        f_1d   = ex.submit(_fetch_raw, TICKER, "1y",   "1d")
     df_main = calculate_indicators(f_main.result())
     df_15m  = calculate_indicators(f_15m.result())
     df_1h   = calculate_indicators(f_1h.result())
     df_4h   = calculate_indicators(_resample_4h(f_4hr.result()))
     df_1d   = calculate_indicators(f_1d.result())
-    return df_main, df_15m, df_1h, df_4h, df_1d, f_uup.result()
+    return df_main, df_15m, df_1h, df_4h, df_1d, df_uup
 
 
 # ══════════════════════════════════════════════════════════════════════════════

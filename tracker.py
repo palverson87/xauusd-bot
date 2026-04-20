@@ -8,6 +8,7 @@ import yfinance as yf
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import db
+import oanda_feed
 from alpaca_trader import trader
 
 log = logging.getLogger(__name__)
@@ -20,11 +21,14 @@ def check_outcomes():
     if not pending:
         return
     try:
-        price = float(
-            yf.Ticker("GC=F")
-            .history(period="1d", interval="1m", auto_adjust=True)["Close"]
-            .iloc[-1]
-        )
+        if oanda_feed.enabled():
+            price = oanda_feed.live_price()
+        else:
+            price = float(
+                yf.Ticker("GC=F")
+                .history(period="1d", interval="1m", auto_adjust=True)["Close"]
+                .iloc[-1]
+            )
     except Exception as exc:
         log.error("Outcome check — price fetch failed: %s", exc)
         return
