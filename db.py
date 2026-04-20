@@ -10,8 +10,21 @@ from pathlib import Path
 _RAILWAY = Path("/app")
 BASE_DIR  = _RAILWAY if _RAILWAY.exists() else Path(__file__).parent
 
-DB_PATH      = BASE_DIR / "signals.db"
-WEIGHTS_PATH = BASE_DIR / "weights.json"
+DB_PATH       = BASE_DIR / "signals.db"
+WEIGHTS_PATH  = BASE_DIR / "weights.json"
+SETTINGS_PATH = BASE_DIR / "settings.json"
+
+DEFAULT_SETTINGS = {
+    "trading_enabled": True,
+    "score_threshold": 3,
+    "max_positions":   2,
+    "max_daily_loss":  2.0,
+    "atr_sl_mult":     1.5,
+    "atr_tp_mult":     4.5,
+    "atr_sl_min":      0.3,
+    "atr_sl_max":      1.5,
+    "block_asian":     True,
+}
 
 INDICATOR_COLS = {
     "RSI":        "rsi_vote",
@@ -255,6 +268,22 @@ def load_weights():
 
 def save_weights(w):
     WEIGHTS_PATH.write_text(json.dumps(w, indent=2))
+
+
+# ── Strategy settings ──────────────────────────────────────────────────────────
+def load_settings():
+    if SETTINGS_PATH.exists():
+        try:
+            s = json.loads(SETTINGS_PATH.read_text())
+            return {**DEFAULT_SETTINGS, **s}
+        except Exception:
+            pass
+    return DEFAULT_SETTINGS.copy()
+
+
+def save_settings(settings):
+    merged = {**DEFAULT_SETTINGS, **settings}
+    SETTINGS_PATH.write_text(json.dumps(merged, indent=2))
 
 
 def recalculate_weights():

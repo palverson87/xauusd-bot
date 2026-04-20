@@ -91,24 +91,24 @@ class AlpacaTrader:
         )
 
     # ── Risk guard-rails ────────────────────────────────────────────────────
-    def _daily_loss_ok(self):
+    def _daily_loss_ok(self, limit_pct=MAX_DAILY_LOSS):
         try:
             acct = self.account()
             eq, last_eq = float(acct.equity), float(acct.last_equity)
             if last_eq == 0:
                 return True
             pnl_pct = (eq - last_eq) / last_eq * 100
-            if pnl_pct <= -MAX_DAILY_LOSS:
+            if pnl_pct <= -abs(limit_pct):
                 log.warning("Daily P&L %.2f%% — trading halted for today", pnl_pct)
                 return False
         except Exception as exc:
             log.error("Daily loss check error: %s", exc)
         return True
 
-    def _positions_ok(self):
+    def _positions_ok(self, limit=MAX_POSITIONS):
         try:
-            if len(self.positions()) >= MAX_POSITIONS:
-                log.info("Max open positions (%d) reached", MAX_POSITIONS)
+            if len(self.positions()) >= limit:
+                log.info("Max open positions (%d) reached", limit)
                 return False
         except Exception as exc:
             log.error("Position count error: %s", exc)
@@ -125,44 +125,52 @@ class AlpacaTrader:
         if not self.enabled:
             return "Alpaca keys not set — trading disabled", None
 
-        v_direction = direction.replace("STRONG ", "")
+        # Load live settings from file (updated via dashboard)
+        settings = db.load_settings()
 
+        if not settings.get("trading_enabled", True):
+            return "Trading disabled in Settings tab", None
+
+        v_direction = direction.replace("STRONG ", "")
         if v_direction not in ("BUY", "SELL"):
             return "Neutral — no trade", None
 
-        if score < 2:
-            return f"Score {score}/5 — below threshold", None
+        threshold = int(settings.get("score_threshold", SCORE_THRESHOLD))
+        log_only_score = threshold - 1
 
-        if score == 2:
-            log.info("Score 2/5: signal logged, not executed")
-            return "Score 2/5: signal noted — below execution threshold", None
+        if score < log_only_score:
+            return f"Score {score}/5 — below threshold ({threshold})", None
 
-        # score >= 3 from here — execute
-        if session == "Asian":
+        if score == log_only_score:
+            log.info("Score %d/5: signal logged, not executed (threshold=%d)", score, threshold)
+            return f"Score {score}/5: signal noted — threshold is {threshold}", None
+
+        # score >= threshold — execute
+        if settings.get("block_asian", True) and session == "Asian":
             return "Skipped: Asian session (low liquidity)", None
 
-        if not self._daily_loss_ok():
-            return "Halted: daily loss limit (2%) reached", None
+        if not self._daily_loss_ok(settings.get("max_daily_loss", MAX_DAILY_LOSS)):
+            return f"Halted: daily loss limit ({settings.get('max_daily_loss', MAX_DAILY_LOSS)}%) reached", None
 
-        if not self._positions_ok():
-            return f"Skipped: {MAX_POSITIONS} open positions already", None
+        max_pos = int(settings.get("max_positions", MAX_POSITIONS))
+        if not self._positions_ok(max_pos):
+            return f"Skipped: {max_pos} open positions already", None
 
-        return self._submit(v_direction, price, score, session, atr)
+        return self._submit(v_direction, price, score, session, atr, settings)
 
     # ── Order submission ────────────────────────────────────────────────────
-    def _submit(self, direction, price, score, session, atr=None):
+    def _submit(self, direction, price, score, session, atr=None, settings=None):
+        if settings is None:
+            settings = db.load_settings()
         symbol = self.gold_symbol()
         side   = "buy" if direction == "BUY" else "sell"
 
         # ── Sell: check shortability and handle conflicting long ───────────
         if side == "sell":
             if self._shortable is None:
-                self.gold_symbol()           # force symbol + shortable detection
+                self.gold_symbol()
             if not self._shortable:
                 return f"Cannot short {symbol} — asset not shortable on this account", None
-
-            # If a conflicting long position exists, close it first so we
-            # can open a clean short rather than just flattening the long.
             try:
                 positions = {p.symbol: p for p in self.positions()}
                 if symbol in positions and float(positions[symbol].qty) > 0:
@@ -171,10 +179,15 @@ class AlpacaTrader:
             except Exception as exc:
                 log.warning("Could not close conflicting long: %s", exc)
 
-        # Dynamic SL/TP from ATR; fallback to fixed %
+        # Dynamic SL/TP from ATR using live settings; fallback to fixed %
+        sl_mult  = float(settings.get("atr_sl_mult", ATR_SL_MULT))
+        tp_mult  = float(settings.get("atr_tp_mult", ATR_TP_MULT))
+        sl_floor = float(settings.get("atr_sl_min",  ATR_SL_MIN))
+        sl_cap   = float(settings.get("atr_sl_max",  ATR_SL_MAX))
+
         if atr and atr > 0:
-            sl_pct = max(ATR_SL_MIN, min(ATR_SL_MAX, atr / price * 100 * ATR_SL_MULT))
-            tp_pct = sl_pct * 3.0
+            sl_pct = max(sl_floor, min(sl_cap, atr / price * 100 * sl_mult))
+            tp_pct = sl_pct * (tp_mult / sl_mult)
             log.info("ATR-based sizing: SL=%.2f%%  TP=%.2f%%  (ATR=%.2f)", sl_pct, tp_pct, atr)
         else:
             sl_pct, tp_pct = STOP_LOSS_PCT, TAKE_PROFIT_PCT

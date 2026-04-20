@@ -21,7 +21,8 @@ logging.basicConfig(level=logging.INFO,
 
 TICKER    = "GC=F"
 DXY_ETF   = "UUP"
-REFRESH_MS = 5 * 60 * 1000
+REFRESH_MS = 60 * 1000          # full chart + confluence refresh (60 s)
+TICKER_MS  = 5  * 1000          # live price ticker (5 s)
 
 PERIOD_OPTIONS = [
     {"label": "5 Days (1h)",   "value": "5d|1h"},
@@ -1131,6 +1132,140 @@ def build_paper_trades_tab():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  LIVE PRICE BAR
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_live_price_bar(price=None, bid=None, ask=None, prev_close=None, source="yfinance"):
+    if price is None:
+        return html.Div(style={"height": "44px"})
+
+    change     = price - prev_close if prev_close else 0.0
+    change_pct = change / prev_close * 100 if prev_close else 0.0
+    up         = change >= 0
+    col        = GREEN if up else RED
+    arrow      = "▲" if up else "▼"
+    spread     = f"  ·  Bid {bid:,.2f}  /  Ask {ask:,.2f}" if bid and ask else ""
+    src_dot    = html.Span("● LIVE", style={
+        "color": GREEN, "fontSize": "10px", "fontFamily": "monospace",
+        "marginLeft": "12px", "letterSpacing": "0.08em",
+    }) if source == "oanda" else html.Span(
+        "yfinance", style={"color": DIM, "fontSize": "10px", "fontFamily": "monospace",
+                           "marginLeft": "12px"})
+
+    return html.Div([
+        html.Span("XAU/USD", style={"color": DIM, "fontFamily": "monospace",
+                                     "fontSize": "12px", "marginRight": "10px"}),
+        html.Span(f"${price:,.2f}", style={"color": TEXT, "fontFamily": "monospace",
+                                            "fontSize": "26px", "fontWeight": "700",
+                                            "marginRight": "8px"}),
+        html.Span(f"{arrow} {change:+,.2f}  ({change_pct:+.2f}%)",
+                  style={"color": col, "fontFamily": "monospace", "fontSize": "14px",
+                         "fontWeight": "600", "marginRight": "8px"}),
+        html.Span(spread, style={"color": DIM, "fontFamily": "monospace", "fontSize": "12px"}),
+        src_dot,
+    ], style={
+        "background": PANEL, "border": f"1px solid {BORDER}",
+        "borderLeft": f"4px solid {col}",
+        "borderRadius": "8px", "padding": "8px 20px",
+        "display": "flex", "alignItems": "center",
+        "marginBottom": "12px",
+    })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SETTINGS TAB
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _setting_row(label, hint, control):
+    return html.Div([
+        html.Div([
+            html.P(label, style={"margin": 0, "color": TEXT, "fontFamily": "monospace",
+                                  "fontSize": "13px", "fontWeight": "600"}),
+            html.P(hint,  style={"margin": "2px 0 0", "color": DIM, "fontFamily": "monospace",
+                                  "fontSize": "10px"}),
+        ], style={"flex": "1"}),
+        html.Div(control, style={"flex": "1", "display": "flex", "alignItems": "center"}),
+    ], style={"display": "flex", "alignItems": "center", "padding": "10px 0",
+               "borderBottom": f"1px solid {BORDER}"})
+
+
+def build_settings_tab():
+    s = db.load_settings()
+
+    def toggle(id_, val):
+        return dcc.RadioItems(
+            id=id_, value="on" if val else "off",
+            options=[{"label": "  ON",  "value": "on"},
+                     {"label": "  OFF", "value": "off"}],
+            inline=True,
+            inputStyle={"marginRight": "4px"},
+            labelStyle={"marginRight": "16px", "color": TEXT,
+                        "fontFamily": "monospace", "fontSize": "13px"},
+        )
+
+    def slider(id_, val, mn, mx, step, marks=None):
+        return dcc.Slider(
+            id=id_, value=val, min=mn, max=mx, step=step,
+            marks=marks or {i: {"label": str(i), "style": {"color": DIM, "fontSize": "10px"}}
+                            for i in [mn, (mn+mx)//2, mx]},
+            tooltip={"placement": "bottom", "always_visible": True},
+        )
+
+    rows = [
+        _setting_row("Trading Enabled",
+                     "Master switch — disables all order submission when OFF",
+                     toggle("set-trading-enabled", s["trading_enabled"])),
+        _setting_row("Score Threshold",
+                     "Minimum confluence score (0–5) to execute a trade",
+                     slider("set-score-threshold", s["score_threshold"], 1, 5, 1,
+                            {i: {"label": str(i), "style": {"color": DIM, "fontSize": "10px"}}
+                             for i in range(1, 6)})),
+        _setting_row("Max Open Positions",
+                     "Maximum concurrent trades at any time",
+                     slider("set-max-positions", s["max_positions"], 1, 6, 1,
+                            {i: {"label": str(i), "style": {"color": DIM, "fontSize": "10px"}}
+                             for i in range(1, 7)})),
+        _setting_row("Daily Loss Limit (%)",
+                     "Halt trading when day's P&L drops below this % of equity",
+                     slider("set-max-daily-loss", s["max_daily_loss"], 0.5, 10.0, 0.5,
+                            {v: {"label": f"{v}%", "style": {"color": DIM, "fontSize": "10px"}}
+                             for v in [0.5, 2.0, 5.0, 10.0]})),
+        _setting_row("ATR Stop-Loss Multiplier",
+                     "SL = this × ATR14 from current price",
+                     slider("set-atr-sl-mult", s["atr_sl_mult"], 0.5, 4.0, 0.25,
+                            {v: {"label": str(v), "style": {"color": DIM, "fontSize": "10px"}}
+                             for v in [0.5, 1.5, 2.5, 4.0]})),
+        _setting_row("ATR Take-Profit Multiplier",
+                     "TP = this × ATR14  (keep ≥ 3× SL mult for positive R:R)",
+                     slider("set-atr-tp-mult", s["atr_tp_mult"], 1.5, 12.0, 0.5,
+                            {v: {"label": str(v), "style": {"color": DIM, "fontSize": "10px"}}
+                             for v in [1.5, 4.5, 8.0, 12.0]})),
+        _setting_row("Block Asian Session",
+                     "Skip trade execution during Asian hours (00:00–07:00 UTC)",
+                     toggle("set-block-asian", s["block_asian"])),
+    ]
+
+    save_btn = html.Button("Save Settings", id="btn-save-settings", n_clicks=0, style={
+        "backgroundColor": BLUE, "color": BG, "border": "none",
+        "borderRadius": "6px", "padding": "10px 28px",
+        "fontFamily": "monospace", "fontSize": "13px", "fontWeight": "700",
+        "cursor": "pointer", "marginTop": "16px",
+    })
+    save_msg = html.Div(id="settings-save-msg", style={"marginTop": "10px",
+                                                         "fontFamily": "monospace",
+                                                         "fontSize": "12px"})
+
+    return html.Div([
+        _panel([
+            _label("Strategy Settings"),
+            html.Div(rows),
+            save_btn,
+            save_msg,
+        ]),
+    ], style={"maxWidth": "860px"})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  APP
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1151,7 +1286,7 @@ app.layout = html.Div([
             html.H1("XAU/USD  ·  Gold Technical Analysis",
                     style={"margin": 0, "fontSize": "18px", "fontWeight": "700",
                            "color": TEXT, "fontFamily": "monospace"}),
-            html.P("GC=F  ·  Multi-timeframe  ·  Adaptive learning  ·  Powered by yfinance",
+            html.P(f"XAU_USD  ·  {'Oanda live' if oanda_feed.enabled() else 'yfinance'}  ·  Multi-timeframe  ·  Adaptive learning",
                    style={"margin": "4px 0 0", "color": DIM, "fontSize": "11px",
                           "fontFamily": "monospace"}),
         ]),
@@ -1169,6 +1304,9 @@ app.layout = html.Div([
                "background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
                "padding": "14px 20px", "marginBottom": "12px"}),
 
+    # Live price bar (updates every 5 s)
+    html.Div(id="live-price-bar"),
+
     # Tabs
     dcc.Tabs(id="tabs", value="analysis", children=[
         dcc.Tab(label="Analysis",     value="analysis",
@@ -1177,18 +1315,89 @@ app.layout = html.Div([
                 style=TAB_STYLE, selected_style=TAB_SELECTED),
         dcc.Tab(label="Paper Trades", value="paper_trades",
                 style=TAB_STYLE, selected_style=TAB_SELECTED),
+        dcc.Tab(label="Settings",     value="settings",
+                style=TAB_STYLE, selected_style=TAB_SELECTED),
     ], style={"marginBottom": "0"}),
 
     html.Div(id="tab-content"),
 
     html.Div(id="error-banner"),
-    dcc.Interval(id="timer", interval=REFRESH_MS, n_intervals=0),
+    dcc.Interval(id="timer",  interval=REFRESH_MS, n_intervals=0),
+    dcc.Interval(id="ticker", interval=TICKER_MS,  n_intervals=0),
 
 ], style={"backgroundColor": BG, "minHeight": "100vh",
            "padding": "16px 20px", "boxSizing": "border-box"})
 
 
 # ── Callbacks ──────────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("live-price-bar", "children"),
+    Input("ticker", "n_intervals"),
+)
+def update_live_price(_n):
+    try:
+        if oanda_feed.enabled():
+            from oandapyV20.endpoints.pricing import PricingInfo
+            from oandapyV20 import API as _OA
+            client = _OA(access_token=oanda_feed.OANDA_API_KEY,
+                         environment=oanda_feed.OANDA_ENV)
+            r = PricingInfo(oanda_feed.OANDA_ACCOUNT_ID,
+                            params={"instruments": oanda_feed.INSTRUMENT})
+            client.request(r)
+            p   = r.response["prices"][0]
+            bid = float(p["bids"][0]["price"])
+            ask = float(p["asks"][0]["price"])
+            mid = (bid + ask) / 2
+            # prev close from last daily candle
+            try:
+                prev_df = oanda_feed.fetch_candles("1d", 2)
+                prev_close = float(prev_df["Close"].iloc[-2]) if len(prev_df) >= 2 else None
+            except Exception:
+                prev_close = None
+            return build_live_price_bar(mid, bid, ask, prev_close, source="oanda")
+        else:
+            df = _fetch_raw(TICKER, "2d", "1m")
+            price = float(df["Close"].iloc[-1])
+            prev  = float(df["Close"].iloc[0])
+            return build_live_price_bar(price, prev_close=prev, source="yfinance")
+    except Exception as exc:
+        log.warning("Live price update failed: %s", exc)
+        return build_live_price_bar()
+
+
+@app.callback(
+    Output("settings-save-msg", "children"),
+    Output("settings-save-msg", "style"),
+    Input("btn-save-settings", "n_clicks"),
+    State("set-trading-enabled",  "value"),
+    State("set-score-threshold",  "value"),
+    State("set-max-positions",    "value"),
+    State("set-max-daily-loss",   "value"),
+    State("set-atr-sl-mult",      "value"),
+    State("set-atr-tp-mult",      "value"),
+    State("set-block-asian",      "value"),
+    prevent_initial_call=True,
+)
+def save_settings_cb(n_clicks, trading_enabled, score_threshold,
+                     max_positions, max_daily_loss, atr_sl_mult, atr_tp_mult, block_asian):
+    base_style = {"marginTop": "10px", "fontFamily": "monospace", "fontSize": "12px"}
+    try:
+        db.save_settings({
+            "trading_enabled": trading_enabled == "on",
+            "score_threshold": int(score_threshold),
+            "max_positions":   int(max_positions),
+            "max_daily_loss":  float(max_daily_loss),
+            "atr_sl_mult":     float(atr_sl_mult),
+            "atr_tp_mult":     float(atr_tp_mult),
+            "atr_sl_min":      db.load_settings().get("atr_sl_min", 0.3),
+            "atr_sl_max":      db.load_settings().get("atr_sl_max", 1.5),
+            "block_asian":     block_asian == "on",
+        })
+        return "✓ Settings saved — applied on next trade check", {**base_style, "color": GREEN}
+    except Exception as exc:
+        return f"✗ Save failed: {exc}", {**base_style, "color": RED}
+
 
 @app.callback(
     Output("tab-content",  "children"),
@@ -1207,6 +1416,12 @@ def render_tab(tab, _n, period_value):
     if tab == "paper_trades":
         try:
             return build_paper_trades_tab(), ""
+        except Exception as exc:
+            return "", _err(exc)
+
+    if tab == "settings":
+        try:
+            return build_settings_tab(), ""
         except Exception as exc:
             return "", _err(exc)
 
