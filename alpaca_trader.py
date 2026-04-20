@@ -20,8 +20,12 @@ log = logging.getLogger(__name__)
 PAPER_URL       = "https://paper-api.alpaca.markets"
 MAX_POSITIONS   = 2
 MAX_DAILY_LOSS  = 2.0   # %
-STOP_LOSS_PCT   = 0.5   # %
-TAKE_PROFIT_PCT = 1.5   # %  (3:1 R:R)
+STOP_LOSS_PCT   = 0.5   # % fallback when ATR unavailable
+TAKE_PROFIT_PCT = 1.5   # % fallback (3:1 R:R)
+ATR_SL_MULT     = 1.5   # SL = 1.5 × ATR
+ATR_TP_MULT     = 4.5   # TP = 4.5 × ATR (3:1 R:R)
+ATR_SL_MIN      = 0.3   # floor %
+ATR_SL_MAX      = 1.5   # cap %
 SCORE_THRESHOLD = 3     # minimum score to actually execute
 
 
@@ -108,11 +112,12 @@ class AlpacaTrader:
         return True
 
     # ── Entry point from dashboard callback ────────────────────────────────
-    def maybe_trade(self, score, direction, price, session):
+    def maybe_trade(self, score, direction, price, session, atr=None):
         """
         Evaluate all conditions and place an order if everything passes.
         Returns (status_message: str, order_id: str | None).
         Score 2 = log only; score 3-5 = execute.
+        atr: current ATR14 value for dynamic SL/TP sizing.
         """
         if not self.enabled:
             return "Alpaca keys not set — trading disabled", None
@@ -139,19 +144,27 @@ class AlpacaTrader:
         if not self._positions_ok():
             return f"Skipped: {MAX_POSITIONS} open positions already", None
 
-        return self._submit(v_direction, price, score, session)
+        return self._submit(v_direction, price, score, session, atr)
 
     # ── Order submission ────────────────────────────────────────────────────
-    def _submit(self, direction, price, score, session):
+    def _submit(self, direction, price, score, session, atr=None):
         symbol = self.gold_symbol()
         side   = "buy" if direction == "BUY" else "sell"
 
-        if direction == "BUY":
-            sl = round(price * (1 - STOP_LOSS_PCT   / 100), 2)
-            tp = round(price * (1 + TAKE_PROFIT_PCT / 100), 2)
+        # Dynamic SL/TP from ATR; fallback to fixed %
+        if atr and atr > 0:
+            sl_pct = max(ATR_SL_MIN, min(ATR_SL_MAX, atr / price * 100 * ATR_SL_MULT))
+            tp_pct = sl_pct * 3.0
+            log.info("ATR-based sizing: SL=%.2f%%  TP=%.2f%%  (ATR=%.2f)", sl_pct, tp_pct, atr)
         else:
-            sl = round(price * (1 + STOP_LOSS_PCT   / 100), 2)
-            tp = round(price * (1 - TAKE_PROFIT_PCT / 100), 2)
+            sl_pct, tp_pct = STOP_LOSS_PCT, TAKE_PROFIT_PCT
+
+        if direction == "BUY":
+            sl = round(price * (1 - sl_pct / 100), 2)
+            tp = round(price * (1 + tp_pct / 100), 2)
+        else:
+            sl = round(price * (1 + sl_pct / 100), 2)
+            tp = round(price * (1 - tp_pct / 100), 2)
 
         qty = "1"   if symbol == "GLD"    else "0.1"
         tif = "day" if symbol == "GLD"    else "gtc"

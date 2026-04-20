@@ -30,10 +30,12 @@ PERIOD_OPTIONS = [
 ]
 
 SESSION_ZONES = [
-    (0,  8,  "#0d47a1", "Asian",     "Low volatility / positioning"),
-    (8,  12, "#0277bd", "London",    "High probability"),
-    (12, 16, "#1b5e20", "London/NY", "Optimal trading window"),
-    (16, 21, "#1565c0", "NY",        "Active"),
+    (0,    7,   "#263238", "Asian",      "Low volatility — reduce size"),
+    (7,    9,   "#1b5e20", "London KZ",  "Kill zone — highest probability"),
+    (9,    12,  "#0277bd", "London",     "Active session"),
+    (12,   13.5,"#0d47a1", "Overlap",    "London/NY transition"),
+    (13.5, 16,  "#2e7d32", "NY Open KZ", "Kill zone — high probability"),
+    (16,   21,  "#1565c0", "NY",         "Active session"),
 ]
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -80,38 +82,60 @@ def _resample_4h(df):
 
 def calculate_indicators(df):
     c = df["Close"]
+    # RSI (Wilder)
     delta = c.diff()
     avg_g = delta.clip(lower=0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     avg_l = (-delta.clip(upper=0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     df["RSI"] = 100 - 100 / (1 + avg_g / avg_l.replace(0, np.nan))
+    # Stochastic RSI (14, 14, 3, 3)
+    rsi_min = df["RSI"].rolling(14).min()
+    rsi_max = df["RSI"].rolling(14).max()
+    stoch   = (df["RSI"] - rsi_min) / (rsi_max - rsi_min + 1e-9)
+    df["StochK"] = stoch.rolling(3).mean() * 100
+    df["StochD"] = df["StochK"].rolling(3).mean()
+    # MACD
     ema12 = c.ewm(span=12, adjust=False).mean()
     ema26 = c.ewm(span=26, adjust=False).mean()
     df["MACD"]        = ema12 - ema26
     df["MACD_signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
     df["MACD_hist"]   = df["MACD"] - df["MACD_signal"]
+    # Bollinger Bands
     df["BB_mid"]   = c.rolling(20).mean()
     bb_std         = c.rolling(20).std()
     df["BB_upper"] = df["BB_mid"] + 2 * bb_std
     df["BB_lower"] = df["BB_mid"] - 2 * bb_std
+    # EMA ribbon (scalp structure)
+    df["EMA8"]   = c.ewm(span=8,   adjust=False).mean()
+    df["EMA21"]  = c.ewm(span=21,  adjust=False).mean()
+    df["EMA55"]  = c.ewm(span=55,  adjust=False).mean()
+    # Legacy MAs (kept for chart + golden/death cross)
     df["SMA9"]   = c.rolling(9).mean()
     df["SMA50"]  = c.rolling(50).mean()
     df["SMA200"] = c.rolling(200).mean()
     df["EMA20"]  = c.ewm(span=20, adjust=False).mean()
+    # ATR (14) — for dynamic SL/TP
+    hl  = df["High"] - df["Low"]
+    hpc = abs(df["High"] - df["Close"].shift(1))
+    lpc = abs(df["Low"]  - df["Close"].shift(1))
+    df["ATR14"] = pd.concat([hl, hpc, lpc], axis=1).max(axis=1) \
+                    .ewm(span=14, min_periods=14, adjust=False).mean()
     return df
 
 
 def fetch_all(period, interval):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
         f_main = ex.submit(_fetch_raw, TICKER,   period, interval)
+        f_15m  = ex.submit(_fetch_raw, TICKER,   "3d",   "15m")
         f_1h   = ex.submit(_fetch_raw, TICKER,   "7d",   "1h")
         f_4hr  = ex.submit(_fetch_raw, TICKER,   "60d",  "1h")
         f_1d   = ex.submit(_fetch_raw, TICKER,   "1y",   "1d")
         f_uup  = ex.submit(_fetch_raw, DXY_ETF,  "30d",  "1d")
     df_main = calculate_indicators(f_main.result())
+    df_15m  = calculate_indicators(f_15m.result())
     df_1h   = calculate_indicators(f_1h.result())
     df_4h   = calculate_indicators(_resample_4h(f_4hr.result()))
     df_1d   = calculate_indicators(f_1d.result())
-    return df_main, df_1h, df_4h, df_1d, f_uup.result()
+    return df_main, df_15m, df_1h, df_4h, df_1d, f_uup.result()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -142,10 +166,10 @@ def _ma_sig(row):
     return                          "NEUT", YELLOW, "Mixed"
 
 
-def mtf_signals(df_1h, df_4h, df_1d):
+def mtf_signals(df_15m, df_1h, df_4h, df_1d):
     return {
         tf: (_rsi_sig(df.iloc[-1]), _macd_sig(df.iloc[-1]), _ma_sig(df.iloc[-1]))
-        for tf, df in [("1H", df_1h), ("4H", df_4h), ("1D", df_1d)]
+        for tf, df in [("15M", df_15m), ("1H", df_1h), ("4H", df_4h), ("1D", df_1d)]
     }
 
 
@@ -157,6 +181,53 @@ def ma_crossover_signal(df):
     if s > e and s1 <= e1: return "BULL CROSS ▲", GREEN
     if s < e and s1 >= e1: return "BEAR CROSS ▼", RED
     return ("BULL", GREEN) if s > e else ("BEAR", RED)
+
+
+def _stochrsi_sig(row):
+    k = row.get("StochK") if isinstance(row, dict) else row["StochK"]
+    if pd.isna(k): return "N/A", DIM, "–"
+    if k < 20:     return "BULL", GREEN,  f"K={k:.1f} oversold"
+    if k > 80:     return "BEAR", RED,    f"K={k:.1f} overbought"
+    return                 "NEUT", YELLOW, f"K={k:.1f}"
+
+
+def _ema_ribbon_sig(row):
+    e8, e21, e55 = row["EMA8"], row["EMA21"], row["EMA55"]
+    if any(pd.isna(v) for v in [e8, e21, e55]): return "N/A", DIM, "–"
+    if e8 > e21 > e55: return "BULL", GREEN,  "Aligned ↑"
+    if e8 < e21 < e55: return "BEAR", RED,    "Aligned ↓"
+    return                     "NEUT", YELLOW, "Mixed"
+
+
+def _macd_hist_sig(df):
+    if len(df) < 2: return "N/A", DIM, "–"
+    h, h1 = df["MACD_hist"].iloc[-1], df["MACD_hist"].iloc[-2]
+    if pd.isna(h): return "N/A", DIM, "–"
+    if h > 0 and h > h1: return "BULL", GREEN,  f"{h:+.2f} rising"
+    if h < 0 and h < h1: return "BEAR", RED,    f"{h:+.2f} falling"
+    return                       "NEUT", YELLOW, f"{h:+.2f} flat"
+
+
+def _bb_pos_sig(row):
+    c, upper, lower = row["Close"], row["BB_upper"], row["BB_lower"]
+    if any(pd.isna(v) for v in [upper, lower]): return "N/A", DIM, "–"
+    rng = upper - lower
+    if rng == 0: return "NEUT", YELLOW, "–"
+    pos = (c - lower) / rng
+    if pos < 0.25: return "BULL", GREEN,  f"Near lower {pos:.0%}"
+    if pos > 0.75: return "BEAR", RED,    f"Near upper {pos:.0%}"
+    return                 "NEUT", YELLOW, f"Mid {pos:.0%}"
+
+
+def _kill_zone_sig():
+    _, name, _, col, active = get_session()
+    if name in ("London KZ", "NY Open KZ"):
+        return "ACTIVE",   GREEN,  name
+    if name == "Asian":
+        return "AVOID",    RED,    "Asian session"
+    if active:
+        return "OPEN",     YELLOW, name
+    return     "INACTIVE", DIM,    "Off hours"
 
 
 def dxy_signal(df_uup):
@@ -182,38 +253,69 @@ def liquidity_levels(df_1d):
     return float(prev["High"]), float(prev["Low"])
 
 
-def compute_confluence(df_main, df_4h, df_uup, weights=None):
+def compute_confluence(df_15m, df_1h, df_4h, df_uup, weights=None):
+    """
+    7-signal ICT-style confluence:
+      1. StochRSI 15M     — entry timing (oversold/overbought)
+      2. EMA Ribbon 4H    — trend structure (8/21/55 alignment)
+      3. MACD Hist 1H     — momentum (rising/falling histogram)
+      4. BB Position 1H   — mean reversion zone (near band edge)
+      5. DXY / UUP        — macro correlation
+      6. Kill Zone        — London KZ / NY Open KZ = active
+      7. HTF Bias 4H      — price above/below EMA55 on 4H
+    Score normalised to 0–5.
+    """
     if weights is None:
         weights = db.load_weights()
 
     results = []
-    r = df_main.iloc[-1]
 
-    lbl, col, _ = _rsi_sig(r)
+    # 1. StochRSI 15M
+    lbl, col, sub = _stochrsi_sig(df_15m.iloc[-1])
     vote = 1 if lbl == "BULL" else (-1 if lbl == "BEAR" else 0)
-    results.append(("RSI", lbl, col, vote, weights.get("RSI", 1.0)))
+    results.append(("StochRSI 15M", lbl, col, vote, weights.get("StochRSI 15M", 1.0)))
 
-    lbl, col, _ = _macd_sig(r)
-    vote = 1 if lbl == "BULL" else -1
-    results.append(("MACD", lbl, col, vote, weights.get("MACD", 1.0)))
+    # 2. EMA Ribbon 4H
+    lbl, col, sub = _ema_ribbon_sig(df_4h.iloc[-1])
+    vote = 1 if lbl == "BULL" else (-1 if lbl == "BEAR" else 0)
+    results.append(("EMA Ribbon 4H", lbl, col, vote, weights.get("EMA Ribbon 4H", 1.0)))
 
-    lbl, col = ma_crossover_signal(df_4h)
-    vote = 1 if "BULL" in lbl else (-1 if "BEAR" in lbl else 0)
-    results.append(("MA Cross 4H", lbl, col, vote, weights.get("MA Cross 4H", 1.0)))
+    # 3. MACD Histogram 1H
+    lbl, col, sub = _macd_hist_sig(df_1h)
+    vote = 1 if lbl == "BULL" else (-1 if lbl == "BEAR" else 0)
+    results.append(("MACD Hist 1H", lbl, col, vote, weights.get("MACD Hist 1H", 1.0)))
 
+    # 4. BB Position 1H
+    lbl, col, sub = _bb_pos_sig(df_1h.iloc[-1])
+    vote = 1 if lbl == "BULL" else (-1 if lbl == "BEAR" else 0)
+    results.append(("BB Position 1H", lbl, col, vote, weights.get("BB Position 1H", 1.0)))
+
+    # 5. DXY / UUP macro
     lbl, col, _ = dxy_signal(df_uup)
     vote = 1 if "BULL" in lbl else (-1 if "BEAR" in lbl else 0)
     results.append(("DXY / UUP", lbl, col, vote, weights.get("DXY / UUP", 1.0)))
 
-    _, sess_name, _, sess_col, sess_active = get_session()
-    if sess_active:
-        bull_so_far = sum(1 for *_, v, w in results if v == 1)
-        bear_so_far = sum(1 for *_, v, w in results if v == -1)
-        sess_vote = 1 if bull_so_far >= bear_so_far else -1
-        results.append(("Session", sess_name, sess_col, sess_vote,
-                         weights.get("Session", 1.0)))
+    # 6. Kill Zone session
+    lbl, col, sub = _kill_zone_sig()
+    if lbl == "ACTIVE":
+        vote = 1
+    elif lbl == "AVOID":
+        vote = -1
     else:
-        results.append(("Session", "INACTIVE", DIM, 0, weights.get("Session", 1.0)))
+        vote = 0
+    results.append(("Kill Zone", lbl, col, vote, weights.get("Kill Zone", 1.0)))
+
+    # 7. HTF Bias — price vs EMA55 on 4H
+    r4 = df_4h.iloc[-1]
+    e55, price_4h = r4["EMA55"], r4["Close"]
+    if not pd.isna(e55):
+        htf_vote = 1 if price_4h > e55 else -1
+        htf_lbl  = "BULL" if htf_vote == 1 else "BEAR"
+        htf_col  = GREEN  if htf_vote == 1 else RED
+    else:
+        htf_vote, htf_lbl, htf_col = 0, "N/A", DIM
+    results.append(("HTF Bias 4H", htf_lbl, htf_col, htf_vote,
+                     weights.get("HTF Bias 4H", 1.0)))
 
     # Weighted scoring
     bull_w  = sum(w for *_, v, w in results if v == 1)
@@ -232,7 +334,6 @@ def compute_confluence(df_main, df_4h, df_uup, weights=None):
     else:
         verdict = ("NEUTRAL", YELLOW)
 
-    # Strip weight from display tuples
     display = [(n, l, c, v) for n, l, c, v, _ in results]
     return score, direction, verdict, display
 
@@ -420,16 +521,16 @@ def build_mtf_panel(sigs, df_4h):
                                            "fontFamily": "monospace", "padding": "7px 14px"})
 
     rows = [
-        html.Tr([td_label(ind)] + [td_sig(*sigs[tf][i]) for tf in ["1H", "4H", "1D"]])
+        html.Tr([td_label(ind)] + [td_sig(*sigs[tf][i]) for tf in ["15M", "1H", "4H", "1D"]])
         for i, ind in enumerate(["RSI", "MACD", "MA"])
     ]
     rows.append(html.Tr([td_label("SMA9/EMA20"), td_dash(),
-                          td_sig(mac_lbl, mac_col), td_dash()]))
+                          td_dash(), td_sig(mac_lbl, mac_col), td_dash()]))
 
     return _panel([
         _label("Multi-Timeframe Analysis"),
         html.Table([
-            html.Thead(html.Tr([th("Indicator"), th("1H"), th("4H"), th("1D")])),
+            html.Thead(html.Tr([th("Indicator"), th("15M"), th("1H"), th("4H"), th("1D")])),
             html.Tbody(rows),
         ], style={"width": "100%", "borderCollapse": "collapse"}),
     ])
@@ -515,20 +616,22 @@ def build_figure(df, df_1d):
         fill="tonexty", fillcolor="rgba(188,140,255,0.07)"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["BB_mid"],  name="BB Mid",
         line=dict(color=PURPLE, width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["SMA9"],   name="SMA 9",
+    # EMA ribbon (scalp structure)
+    fig.add_trace(go.Scatter(x=df.index, y=df["EMA8"],   name="EMA 8",
         line=dict(color=TEAL,   width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"],  name="EMA 20",
+    fig.add_trace(go.Scatter(x=df.index, y=df["EMA21"],  name="EMA 21",
         line=dict(color=BLUE,   width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["SMA50"],  name="SMA 50",
-        line=dict(color=ORANGE, width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["EMA55"],  name="EMA 55",
+        line=dict(color=ORANGE, width=2.0)), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["SMA200"], name="SMA 200",
         line=dict(color=RED,    width=1.5, dash="dash")), row=1, col=1)
 
-    s9  = df["SMA9"].ffill()
-    e20 = df["EMA20"]
-    if not s9.isna().all():
-        up   = (s9 > e20) & (s9.shift(1) <= e20.shift(1))
-        down = (s9 < e20) & (s9.shift(1) >= e20.shift(1))
+    # EMA 8/21 crossover markers
+    e8  = df["EMA8"].ffill()
+    e21 = df["EMA21"]
+    if not e8.isna().all():
+        up   = (e8 > e21) & (e8.shift(1) <= e21.shift(1))
+        down = (e8 < e21) & (e8.shift(1) >= e21.shift(1))
         if up.any():
             fig.add_trace(go.Scatter(x=df.index[up], y=df["Low"][up] * 0.9975,
                 mode="markers", name="Bull Cross",
@@ -1091,12 +1194,12 @@ def render_tab(tab, _n, period_value):
     # ── Analysis tab ──────────────────────────────────────────────────────
     period, interval = period_value.split("|")
     try:
-        df_main, df_1h, df_4h, df_1d, df_uup = fetch_all(period, interval)
+        df_main, df_15m, df_1h, df_4h, df_1d, df_uup = fetch_all(period, interval)
         if df_main.empty or len(df_main) < 5:
             raise ValueError("No data returned — market may be closed.")
 
-        score, direction, verdict, conf_results = compute_confluence(df_main, df_4h, df_uup)
-        sigs = mtf_signals(df_1h, df_4h, df_1d)
+        score, direction, verdict, conf_results = compute_confluence(df_15m, df_1h, df_4h, df_uup)
+        sigs = mtf_signals(df_15m, df_1h, df_4h, df_1d)
 
         # ── Log signal to DB ───────────────────────────────────────────────
         try:
@@ -1118,11 +1221,13 @@ def render_tab(tab, _n, period_value):
 
         # ── Auto-trade via Alpaca (score 5 only, non-Asian sessions) ──────
         try:
+            _r = df_main.iloc[-1]
             trade_msg, order_id = trader.maybe_trade(
                 score=score,
                 direction=verdict[0],
-                price=float(df_main.iloc[-1]["Close"]),
+                price=float(_r["Close"]),
                 session=sess_name,
+                atr=float(_r["ATR14"]) if not pd.isna(_r["ATR14"]) else None,
             )
             if order_id:
                 app.logger.info("Trade executed: %s  order=%s", trade_msg, order_id)
