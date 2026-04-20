@@ -9,7 +9,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
-import yfinance as yf
 
 import db
 import tracker
@@ -19,8 +18,6 @@ from alpaca_trader import trader
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 
-TICKER    = "GC=F"
-DXY_ETF   = "UUP"
 REFRESH_MS = 60 * 1000          # full chart + confluence refresh (60 s)
 TICKER_MS  = 5  * 1000          # live price ticker (5 s)
 
@@ -66,22 +63,6 @@ def _hex_rgba(hex_color, alpha):
 #  DATA
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _fetch_raw(ticker, period, interval):
-    df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True)
-    df.index = pd.to_datetime(df.index)
-    if df.index.tz is not None:
-        df.index = df.index.tz_convert(None)
-    return df[["Open", "High", "Low", "Close", "Volume"]].copy()
-
-
-def _resample_4h(df):
-    return (
-        df.resample("4h", label="left", closed="left")
-        .agg({"Open": "first", "High": "max", "Low": "min",
-              "Close": "last", "Volume": "sum"})
-        .dropna()
-    )
-
 
 def calculate_indicators(df):
     c = df["Close"]
@@ -126,36 +107,17 @@ def calculate_indicators(df):
 
 
 def fetch_all(period, interval):
-    # Always fetch DXY/UUP from yfinance (Oanda doesn't carry ETFs)
-    df_uup = _fetch_raw(DXY_ETF, "30d", "1d")
-
-    if oanda_feed.enabled():
-        try:
-            raw_main, raw_15m, raw_1h, raw_4h, raw_1d = \
-                oanda_feed.fetch_all_oanda(f"{period}|{interval}")
-            # Oanda gives native 4H — no resampling needed
-            df_main = calculate_indicators(raw_main)
-            df_15m  = calculate_indicators(raw_15m)
-            df_1h   = calculate_indicators(raw_1h)
-            df_4h   = calculate_indicators(raw_4h)
-            df_1d   = calculate_indicators(raw_1d)
-            return df_main, df_15m, df_1h, df_4h, df_1d, df_uup
-        except Exception as exc:
-            log.warning("Oanda fetch failed — falling back to yfinance: %s", exc)
-
-    # yfinance fallback
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-        f_main = ex.submit(_fetch_raw, TICKER, period, interval)
-        f_15m  = ex.submit(_fetch_raw, TICKER, "3d",   "15m")
-        f_1h   = ex.submit(_fetch_raw, TICKER, "7d",   "1h")
-        f_4hr  = ex.submit(_fetch_raw, TICKER, "60d",  "1h")
-        f_1d   = ex.submit(_fetch_raw, TICKER, "1y",   "1d")
-    df_main = calculate_indicators(f_main.result())
-    df_15m  = calculate_indicators(f_15m.result())
-    df_1h   = calculate_indicators(f_1h.result())
-    df_4h   = calculate_indicators(_resample_4h(f_4hr.result()))
-    df_1d   = calculate_indicators(f_1d.result())
-    return df_main, df_15m, df_1h, df_4h, df_1d, df_uup
+    """Fetch all OHLCV data from Oanda — XAU_USD + EUR_USD (DXY proxy)."""
+    raw_main, raw_15m, raw_1h, raw_4h, raw_1d, df_eurusd = \
+        oanda_feed.fetch_all_oanda(f"{period}|{interval}")
+    return (
+        calculate_indicators(raw_main),
+        calculate_indicators(raw_15m),
+        calculate_indicators(raw_1h),
+        calculate_indicators(raw_4h),
+        calculate_indicators(raw_1d),
+        df_eurusd,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -250,12 +212,16 @@ def _kill_zone_sig():
     return     "INACTIVE", DIM,    "Off hours"
 
 
-def dxy_signal(df_uup):
-    if len(df_uup) < 6: return "N/A", DIM, 0.0
-    ret5 = (df_uup["Close"].iloc[-1] / df_uup["Close"].iloc[-6] - 1) * 100
-    if ret5 < -0.3: return "BULLISH FOR GOLD", GREEN,  ret5
-    if ret5 >  0.3: return "BEARISH FOR GOLD", RED,    ret5
-    return                  "NEUTRAL",          YELLOW, ret5
+def dxy_signal(df_eurusd):
+    """EUR/USD is the primary DXY component (57.6% weight) and its inverse.
+    EUR/USD rising → DXY falling → bullish for gold.
+    EUR/USD falling → DXY rising → bearish for gold.
+    """
+    if len(df_eurusd) < 6: return "N/A", DIM, 0.0
+    ret5 = (df_eurusd["Close"].iloc[-1] / df_eurusd["Close"].iloc[-6] - 1) * 100
+    if ret5 >  0.15: return "BULLISH FOR GOLD", GREEN,  ret5
+    if ret5 < -0.15: return "BEARISH FOR GOLD", RED,    ret5
+    return                   "NEUTRAL",          YELLOW, ret5
 
 
 def get_session():
@@ -273,14 +239,14 @@ def liquidity_levels(df_1d):
     return float(prev["High"]), float(prev["Low"])
 
 
-def compute_confluence(df_15m, df_1h, df_4h, df_uup, weights=None):
+def compute_confluence(df_15m, df_1h, df_4h, df_eurusd, weights=None):
     """
     7-signal ICT-style confluence:
       1. StochRSI 15M     — entry timing (oversold/overbought)
       2. EMA Ribbon 4H    — trend structure (8/21/55 alignment)
       3. MACD Hist 1H     — momentum (rising/falling histogram)
       4. BB Position 1H   — mean reversion zone (near band edge)
-      5. DXY / UUP        — macro correlation
+      5. EUR/USD (DXY)    — macro correlation via Oanda
       6. Kill Zone        — London KZ / NY Open KZ = active
       7. HTF Bias 4H      — price above/below EMA55 on 4H
     Score normalised to 0–5.
@@ -310,10 +276,10 @@ def compute_confluence(df_15m, df_1h, df_4h, df_uup, weights=None):
     vote = 1 if lbl == "BULL" else (-1 if lbl == "BEAR" else 0)
     results.append(("BB Position 1H", lbl, col, vote, weights.get("BB Position 1H", 1.0)))
 
-    # 5. DXY / UUP macro
-    lbl, col, _ = dxy_signal(df_uup)
+    # 5. EUR/USD macro (DXY inverse proxy via Oanda)
+    lbl, col, _ = dxy_signal(df_eurusd)
     vote = 1 if "BULL" in lbl else (-1 if "BEAR" in lbl else 0)
-    results.append(("DXY / UUP", lbl, col, vote, weights.get("DXY / UUP", 1.0)))
+    results.append(("EUR/USD DXY", lbl, col, vote, weights.get("EUR/USD DXY", 1.0)))
 
     # 6. Kill Zone session
     lbl, col, sub = _kill_zone_sig()
@@ -428,15 +394,15 @@ def build_session_panel():
     ], {"flex": "2"})
 
 
-def build_dxy_panel(df_uup):
-    lbl, col, ret5 = dxy_signal(df_uup)
-    current = df_uup["Close"].iloc[-1] if len(df_uup) else 0.0
-    arrow   = "↓" if ret5 < 0 else "↑"
-    pos_pct = (max(-2.0, min(2.0, ret5)) + 2.0) / 4.0 * 100
+def build_dxy_panel(df_eurusd):
+    lbl, col, ret5 = dxy_signal(df_eurusd)
+    current = df_eurusd["Close"].iloc[-1] if len(df_eurusd) else 0.0
+    arrow   = "↑" if ret5 > 0 else "↓"
+    pos_pct = (max(-1.0, min(1.0, ret5)) + 1.0) / 2.0 * 100
 
     meter = html.Div([
         html.Div(style={"position": "absolute", "inset": "0",
-                         "background": f"linear-gradient(to right,{GREEN}44,{BORDER} 50%,{RED}44)",
+                         "background": f"linear-gradient(to right,{RED}44,{BORDER} 50%,{GREEN}44)",
                          "borderRadius": "4px"}),
         html.Div(style={"position": "absolute", "left": "50%", "width": "1px",
                          "height": "100%", "backgroundColor": BORDER}),
@@ -447,27 +413,27 @@ def build_dxy_panel(df_uup):
                "borderRadius": "4px", "margin": "8px 0"})
 
     return _panel([
-        _label("DXY Correlation  (UUP ETF proxy)"),
+        _label("DXY Correlation  (EUR/USD inverse proxy  ·  Oanda)"),
         html.Div([
-            html.Span(f"UUP  ${current:.2f}", style={"color": TEXT, "fontSize": "18px",
-                                                       "fontWeight": "700",
-                                                       "fontFamily": "monospace"}),
-            html.Span(f"  {arrow} {ret5:+.2f}%  (5d)", style={"color": col,
+            html.Span(f"EUR/USD  {current:.5f}", style={"color": TEXT, "fontSize": "18px",
+                                                          "fontWeight": "700",
+                                                          "fontFamily": "monospace"}),
+            html.Span(f"  {arrow} {ret5:+.3f}%  (5d)", style={"color": col,
                                                                  "fontSize": "13px",
                                                                  "fontFamily": "monospace"}),
         ], style={"marginBottom": "4px"}),
         meter,
         html.Div([
-            html.Span("Gold ↑", style={"color": GREEN, "fontSize": "10px",
-                                        "fontFamily": "monospace"}),
             html.Span("Gold ↓", style={"color": RED,   "fontSize": "10px",
+                                        "fontFamily": "monospace"}),
+            html.Span("Gold ↑", style={"color": GREEN, "fontSize": "10px",
                                         "fontFamily": "monospace"}),
         ], style={"display": "flex", "justifyContent": "space-between",
                    "marginBottom": "8px"}),
-        html.P(f"DXY {arrow}  →  {lbl}",
+        html.P(f"EUR/USD {arrow}  →  {lbl}",
                style={"margin": 0, "color": col, "fontSize": "13px",
                       "fontWeight": "600", "fontFamily": "monospace"}),
-        html.P("Falling DXY = bullish confluence for gold",
+        html.P("Rising EUR/USD = falling DXY = bullish for gold",
                style={"margin": "3px 0 0", "color": DIM, "fontSize": "10px",
                       "fontFamily": "monospace"}),
     ], {"flex": "1"})
@@ -1337,30 +1303,23 @@ app.layout = html.Div([
 )
 def update_live_price(_n):
     try:
-        if oanda_feed.enabled():
-            from oandapyV20.endpoints.pricing import PricingInfo
-            from oandapyV20 import API as _OA
-            client = _OA(access_token=oanda_feed.OANDA_API_KEY,
-                         environment=oanda_feed.OANDA_ENV)
-            r = PricingInfo(oanda_feed.OANDA_ACCOUNT_ID,
-                            params={"instruments": oanda_feed.INSTRUMENT})
-            client.request(r)
-            p   = r.response["prices"][0]
-            bid = float(p["bids"][0]["price"])
-            ask = float(p["asks"][0]["price"])
-            mid = (bid + ask) / 2
-            # prev close from last daily candle
-            try:
-                prev_df = oanda_feed.fetch_candles("1d", 2)
-                prev_close = float(prev_df["Close"].iloc[-2]) if len(prev_df) >= 2 else None
-            except Exception:
-                prev_close = None
-            return build_live_price_bar(mid, bid, ask, prev_close, source="oanda")
-        else:
-            df = _fetch_raw(TICKER, "2d", "1m")
-            price = float(df["Close"].iloc[-1])
-            prev  = float(df["Close"].iloc[0])
-            return build_live_price_bar(price, prev_close=prev, source="yfinance")
+        from oandapyV20.endpoints.pricing import PricingInfo
+        from oandapyV20 import API as _OA
+        client = _OA(access_token=oanda_feed.OANDA_API_KEY,
+                     environment=oanda_feed.OANDA_ENV)
+        r = PricingInfo(oanda_feed.OANDA_ACCOUNT_ID,
+                        params={"instruments": oanda_feed.INSTRUMENT})
+        client.request(r)
+        p   = r.response["prices"][0]
+        bid = float(p["bids"][0]["price"])
+        ask = float(p["asks"][0]["price"])
+        mid = (bid + ask) / 2
+        try:
+            prev_df    = oanda_feed.fetch_candles("1d", 2)
+            prev_close = float(prev_df["Close"].iloc[-2]) if len(prev_df) >= 2 else None
+        except Exception:
+            prev_close = None
+        return build_live_price_bar(mid, bid, ask, prev_close, source="oanda")
     except Exception as exc:
         log.warning("Live price update failed: %s", exc)
         return build_live_price_bar()

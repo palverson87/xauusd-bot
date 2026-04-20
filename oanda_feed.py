@@ -52,7 +52,7 @@ def _client():
         raise RuntimeError("oandapyV20 not installed — run: pip install oandapyV20")
 
 
-def fetch_candles(interval: str, count: int) -> pd.DataFrame:
+def fetch_candles(interval: str, count: int, instrument: str = INSTRUMENT) -> pd.DataFrame:
     """
     Fetch up to `count` completed midpoint candles from Oanda.
     `interval` must be one of: 15m, 1h, 4h, 1d
@@ -66,7 +66,7 @@ def fetch_candles(interval: str, count: int) -> pd.DataFrame:
 
     client = _client()
     params = {"granularity": gran, "count": count, "price": "M"}
-    r = InstrumentsCandles(INSTRUMENT, params=params)
+    r = InstrumentsCandles(instrument, params=params)
     client.request(r)
 
     rows = []
@@ -92,6 +92,11 @@ def fetch_candles(interval: str, count: int) -> pd.DataFrame:
     return df
 
 
+def fetch_eurusd(count: int = 10) -> pd.DataFrame:
+    """Fetch recent EUR/USD daily candles — used as DXY inverse proxy."""
+    return fetch_candles("1d", count, instrument="EUR_USD")
+
+
 def live_price() -> float:
     """Return the current mid price for XAU_USD."""
     from oandapyV20.endpoints.pricing import PricingInfo
@@ -107,19 +112,20 @@ def live_price() -> float:
 
 def fetch_all_oanda(period_interval: str):
     """
-    Fetch all required DataFrames from Oanda.
-    Returns (df_main, df_15m, df_1h, df_4h, df_1d) — no df_uup (still from yfinance).
+    Fetch all required DataFrames from Oanda (no yfinance).
+    Returns (df_main, df_15m, df_1h, df_4h, df_1d, df_eurusd).
     """
     import concurrent.futures
 
     gran, count = _PERIOD_MAP.get(period_interval, ("1h", 168))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-        f_main = ex.submit(fetch_candles, gran,  count)
-        f_15m  = ex.submit(fetch_candles, "15m", 300)
-        f_1h   = ex.submit(fetch_candles, "1h",  168)
-        f_4h   = ex.submit(fetch_candles, "4h",  360)
-        f_1d   = ex.submit(fetch_candles, "1d",  365)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        f_main   = ex.submit(fetch_candles, gran,  count)
+        f_15m    = ex.submit(fetch_candles, "15m", 300)
+        f_1h     = ex.submit(fetch_candles, "1h",  168)
+        f_4h     = ex.submit(fetch_candles, "4h",  360)
+        f_1d     = ex.submit(fetch_candles, "1d",  365)
+        f_eurusd = ex.submit(fetch_eurusd,  10)
 
     return (
         f_main.result(),
@@ -127,4 +133,5 @@ def fetch_all_oanda(period_interval: str):
         f_1h.result(),
         f_4h.result(),
         f_1d.result(),
+        f_eurusd.result(),
     )

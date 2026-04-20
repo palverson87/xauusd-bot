@@ -4,7 +4,6 @@ Background scheduler:
   • Every Sunday 23:59 UTC — generate weekly PDF report
 """
 import logging
-import yfinance as yf
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import db
@@ -21,14 +20,7 @@ def check_outcomes():
     if not pending:
         return
     try:
-        if oanda_feed.enabled():
-            price = oanda_feed.live_price()
-        else:
-            price = float(
-                yf.Ticker("GC=F")
-                .history(period="1d", interval="1m", auto_adjust=True)["Close"]
-                .iloc[-1]
-            )
+        price = oanda_feed.live_price()
     except Exception as exc:
         log.error("Outcome check — price fetch failed: %s", exc)
         return
