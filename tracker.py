@@ -7,7 +7,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import db
-import oanda_feed
+import tv_feed
 from alpaca_trader import trader
 
 log = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ def check_outcomes():
     if not pending:
         return
     try:
-        price = oanda_feed.live_price()
+        price = tv_feed.live_price()
     except Exception as exc:
         log.error("Outcome check — price fetch failed: %s", exc)
         return

@@ -12,7 +12,7 @@ import numpy as np
 
 import db
 import tracker
-import oanda_feed
+import tv_feed
 from alpaca_trader import trader
 
 logging.basicConfig(level=logging.INFO,
@@ -107,9 +107,9 @@ def calculate_indicators(df):
 
 
 def fetch_all(period, interval):
-    """Fetch all OHLCV data from Oanda — XAU_USD + EUR_USD (DXY proxy)."""
+    """Fetch all OHLCV data from TradingView — XAUUSD + EURUSD (DXY proxy)."""
     raw_main, raw_15m, raw_1h, raw_4h, raw_1d, df_eurusd = \
-        oanda_feed.fetch_all_oanda(f"{period}|{interval}")
+        tv_feed.fetch_all_tv(f"{period}|{interval}")
     return (
         calculate_indicators(raw_main),
         calculate_indicators(raw_15m),
@@ -413,7 +413,7 @@ def build_dxy_panel(df_eurusd):
                "borderRadius": "4px", "margin": "8px 0"})
 
     return _panel([
-        _label("DXY Correlation  (EUR/USD inverse proxy  ·  Oanda)"),
+        _label("DXY Correlation  (EUR/USD inverse proxy  ·  TradingView)"),
         html.Div([
             html.Span(f"EUR/USD  {current:.5f}", style={"color": TEXT, "fontSize": "18px",
                                                           "fontWeight": "700",
@@ -1111,12 +1111,12 @@ def build_live_price_bar(price=None, bid=None, ask=None, prev_close=None, source
     col        = GREEN if up else RED
     arrow      = "▲" if up else "▼"
     spread     = f"  ·  Bid {bid:,.2f}  /  Ask {ask:,.2f}" if bid and ask else ""
-    src_dot    = html.Span("● LIVE", style={
+    src_dot    = html.Span("● TradingView", style={
         "color": GREEN, "fontSize": "10px", "fontFamily": "monospace",
         "marginLeft": "12px", "letterSpacing": "0.08em",
-    }) if source == "oanda" else html.Span(
-        "yfinance", style={"color": DIM, "fontSize": "10px", "fontFamily": "monospace",
-                           "marginLeft": "12px"})
+    }) if source == "tv" else html.Span(
+        "–", style={"color": DIM, "fontSize": "10px", "fontFamily": "monospace",
+                    "marginLeft": "12px"})
 
     return html.Div([
         html.Span("XAU/USD", style={"color": DIM, "fontFamily": "monospace",
@@ -1252,7 +1252,7 @@ app.layout = html.Div([
             html.H1("XAU/USD  ·  Gold Technical Analysis",
                     style={"margin": 0, "fontSize": "18px", "fontWeight": "700",
                            "color": TEXT, "fontFamily": "monospace"}),
-            html.P(f"XAU_USD  ·  {'Oanda live' if oanda_feed.enabled() else 'yfinance'}  ·  Multi-timeframe  ·  Adaptive learning",
+            html.P("XAU/USD  ·  TradingView  ·  Multi-timeframe  ·  Adaptive learning",
                    style={"margin": "4px 0 0", "color": DIM, "fontSize": "11px",
                           "fontFamily": "monospace"}),
         ]),
@@ -1303,23 +1303,13 @@ app.layout = html.Div([
 )
 def update_live_price(_n):
     try:
-        from oandapyV20.endpoints.pricing import PricingInfo
-        from oandapyV20 import API as _OA
-        client = _OA(access_token=oanda_feed.OANDA_API_KEY,
-                     environment=oanda_feed.OANDA_ENV)
-        r = PricingInfo(oanda_feed.OANDA_ACCOUNT_ID,
-                        params={"instruments": oanda_feed.INSTRUMENT})
-        client.request(r)
-        p   = r.response["prices"][0]
-        bid = float(p["bids"][0]["price"])
-        ask = float(p["asks"][0]["price"])
-        mid = (bid + ask) / 2
+        price = tv_feed.live_price()
         try:
-            prev_df    = oanda_feed.fetch_candles("1d", 2)
+            prev_df    = tv_feed.fetch_candles("1d", 2)
             prev_close = float(prev_df["Close"].iloc[-2]) if len(prev_df) >= 2 else None
         except Exception:
             prev_close = None
-        return build_live_price_bar(mid, bid, ask, prev_close, source="oanda")
+        return build_live_price_bar(price, prev_close=prev_close, source="tv")
     except Exception as exc:
         log.warning("Live price update failed: %s", exc)
         return build_live_price_bar()
