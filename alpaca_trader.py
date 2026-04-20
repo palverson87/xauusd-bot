@@ -32,10 +32,11 @@ SCORE_THRESHOLD = 3     # minimum score to actually execute
 class AlpacaTrader:
 
     def __init__(self):
-        self.key    = os.getenv("ALPACA_API_KEY",    "")
-        self.secret = os.getenv("ALPACA_SECRET_KEY", "")
-        self._api    = None
-        self._symbol = None
+        self.key       = os.getenv("ALPACA_API_KEY",    "")
+        self.secret    = os.getenv("ALPACA_SECRET_KEY", "")
+        self._api      = None
+        self._symbol   = None
+        self._shortable = None
 
     # ── Connection ─────────────────────────────────────────────────────────
     @property
@@ -61,11 +62,13 @@ class AlpacaTrader:
                 asset = api.get_asset(sym)
                 if asset.tradable:
                     self._symbol = sym
-                    log.info("Gold symbol resolved: %s", sym)
+                    self._shortable = getattr(asset, "shortable", False)
+                    log.info("Gold symbol resolved: %s  shortable=%s", sym, self._shortable)
                     return sym
             except Exception:
                 continue
         self._symbol = "GLD"
+        self._shortable = False
         log.warning("Could not verify symbol — defaulting to GLD")
         return "GLD"
 
@@ -150,6 +153,23 @@ class AlpacaTrader:
     def _submit(self, direction, price, score, session, atr=None):
         symbol = self.gold_symbol()
         side   = "buy" if direction == "BUY" else "sell"
+
+        # ── Sell: check shortability and handle conflicting long ───────────
+        if side == "sell":
+            if self._shortable is None:
+                self.gold_symbol()           # force symbol + shortable detection
+            if not self._shortable:
+                return f"Cannot short {symbol} — asset not shortable on this account", None
+
+            # If a conflicting long position exists, close it first so we
+            # can open a clean short rather than just flattening the long.
+            try:
+                positions = {p.symbol: p for p in self.positions()}
+                if symbol in positions and float(positions[symbol].qty) > 0:
+                    self._get_api().close_position(symbol)
+                    log.info("Closed existing long %s before entering short", symbol)
+            except Exception as exc:
+                log.warning("Could not close conflicting long: %s", exc)
 
         # Dynamic SL/TP from ATR; fallback to fixed %
         if atr and atr > 0:
