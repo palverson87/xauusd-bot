@@ -1,5 +1,6 @@
 import concurrent.futures
 import logging
+import os
 from datetime import datetime, timezone
 
 import dash
@@ -1261,11 +1262,92 @@ def _err(exc):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  TRADINGVIEW WEBHOOK
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  TradingView alert → Webhook URL → POST /webhook
+#
+#  Expected JSON body (paste into TradingView alert "Message" field):
+#  {
+#    "secret":    "YOUR_WEBHOOK_SECRET",
+#    "direction": "BUY",           ← or "SELL"
+#    "price":     {{close}},
+#    "score":     4,               ← optional, defaults to 4
+#    "interval":  "{{interval}}"   ← optional, for logging
+#  }
+#
+#  Set WEBHOOK_SECRET in ecosystem.config.js (same place as Alpaca keys).
+
+import json as _json
+from flask import request as _req, jsonify as _jsonify
+
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
+
+@app.server.route("/webhook", methods=["POST"])
+def tradingview_webhook():
+    try:
+        data = _req.get_json(force=True, silent=True) or {}
+    except Exception:
+        return _jsonify({"error": "invalid JSON"}), 400
+
+    # Validate secret
+    if WEBHOOK_SECRET and data.get("secret") != WEBHOOK_SECRET:
+        log.warning("Webhook: rejected — bad secret from %s", _req.remote_addr)
+        return _jsonify({"error": "unauthorized"}), 403
+
+    direction = str(data.get("direction", "")).upper().strip()
+    if direction not in ("BUY", "SELL"):
+        return _jsonify({"error": f"invalid direction '{direction}'"}), 400
+
+    try:
+        price = float(data["price"])
+    except (KeyError, ValueError, TypeError):
+        return _jsonify({"error": "missing or invalid price"}), 400
+
+    score    = int(data.get("score", 4))
+    interval = str(data.get("interval", "TV"))
+    _, sess_name, _, _, _ = get_session()
+
+    log.info("Webhook received: direction=%s  price=%.2f  score=%d  session=%s  interval=%s",
+             direction, price, score, sess_name, interval)
+
+    # Log to DB
+    try:
+        db.log_signal(
+            ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            price=price,
+            direction=direction,
+            score=score,
+            session=sess_name,
+            rsi=None,
+            votes={"source": "TradingView"},
+            interval=interval,
+        )
+    except Exception as exc:
+        log.warning("Webhook signal log failed: %s", exc)
+
+    # Execute trade
+    trade_msg, order_id = trader.maybe_trade(
+        score=score,
+        direction=direction,
+        price=price,
+        session=sess_name,
+    )
+    log.info("Webhook trade result: %s  order_id=%s", trade_msg, order_id)
+
+    return _jsonify({
+        "status":   "ok",
+        "trade":    trade_msg,
+        "order_id": order_id,
+    }), 200
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    import os
     tracker.start()
     port = int(os.getenv("PORT", 8050))
     host = os.getenv("HOST", "127.0.0.1")
