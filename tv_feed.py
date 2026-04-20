@@ -9,7 +9,7 @@ DXY proxy: EURUSD on OANDA (rising EUR = falling DXY = bullish gold)
 """
 import logging
 import os
-import concurrent.futures
+import time
 
 import pandas as pd
 from tvDatafeed import TvDatafeed, Interval
@@ -70,15 +70,29 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_candles(interval: str, count: int,
-                  symbol: str = SYMBOL, exchange: str = EXCHANGE) -> pd.DataFrame:
-    """Fetch OHLCV bars from TradingView."""
+                  symbol: str = SYMBOL, exchange: str = EXCHANGE,
+                  _retries: int = 3) -> pd.DataFrame:
+    """Fetch OHLCV bars from TradingView with retry on rate-limit."""
+    global _tv
     tv_interval = _INTERVAL.get(interval)
     if tv_interval is None:
         raise ValueError(f"Unsupported interval '{interval}'. Use: {list(_INTERVAL)}")
-    df = _client().get_hist(symbol, exchange, interval=tv_interval, n_bars=count)
-    if df is None or df.empty:
-        raise ValueError(f"TradingView returned no data for {symbol} {interval}")
-    return _normalise(df)
+    for attempt in range(_retries):
+        try:
+            df = _client().get_hist(symbol, exchange, interval=tv_interval, n_bars=count)
+            if df is None or df.empty:
+                raise ValueError(f"TradingView returned no data for {symbol} {interval}")
+            return _normalise(df)
+        except Exception as exc:
+            if "429" in str(exc) or "Too Many" in str(exc):
+                wait = 10 * (attempt + 1)
+                log.warning("TV rate limit hit — waiting %ds (attempt %d/%d)",
+                            wait, attempt + 1, _retries)
+                _tv = None   # force new session on retry
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"TV fetch failed after {_retries} attempts ({symbol} {interval})")
 
 
 def fetch_eurusd(count: int = 10) -> pd.DataFrame:
@@ -92,26 +106,27 @@ def live_price() -> float:
     return float(df["Close"].iloc[-1])
 
 
+_FETCH_DELAY = 1.2   # seconds between requests — avoids TradingView 429s
+
+
 def fetch_all_tv(period_interval: str):
     """
-    Parallel fetch of all timeframes from TradingView.
+    Sequential fetch of all timeframes from TradingView.
+    Sequential (not parallel) to stay within TradingView's rate limits.
     Returns (df_main, df_15m, df_1h, df_4h, df_1d, df_eurusd).
     """
     gran, count = _PERIOD_MAP.get(period_interval, ("1h", 168))
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-        f_main   = ex.submit(fetch_candles, gran,  count)
-        f_15m    = ex.submit(fetch_candles, "15m", 300)
-        f_1h     = ex.submit(fetch_candles, "1h",  168)
-        f_4h     = ex.submit(fetch_candles, "4h",  360)
-        f_1d     = ex.submit(fetch_candles, "1d",  365)
-        f_eurusd = ex.submit(fetch_eurusd,  10)
-
-    return (
-        f_main.result(),
-        f_15m.result(),
-        f_1h.result(),
-        f_4h.result(),
-        f_1d.result(),
-        f_eurusd.result(),
-    )
+    results = []
+    fetches = [
+        (gran,  count,  SYMBOL,  EXCHANGE),
+        ("15m", 300,    SYMBOL,  EXCHANGE),
+        ("1h",  168,    SYMBOL,  EXCHANGE),
+        ("4h",  360,    SYMBOL,  EXCHANGE),
+        ("1d",  365,    SYMBOL,  EXCHANGE),
+        ("1d",  10,     EUR_SYM, EXCHANGE),
+    ]
+    for i, (iv, n, sym, exch) in enumerate(fetches):
+        if i > 0:
+            time.sleep(_FETCH_DELAY)
+        results.append(fetch_candles(iv, n, symbol=sym, exchange=exch))
+    return tuple(results)

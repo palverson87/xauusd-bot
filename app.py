@@ -18,8 +18,12 @@ from alpaca_trader import trader
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 
-REFRESH_MS = 60 * 1000          # full chart + confluence refresh (60 s)
-TICKER_MS  = 5  * 1000          # live price ticker (5 s)
+# Price cache — updated by the main chart callback, read by the ticker
+# (avoids separate API calls every 15 s that trigger TradingView rate limits)
+_price_cache: dict = {"price": None, "prev_close": None, "ts": None}
+
+REFRESH_MS = 3 * 60 * 1000      # full chart + confluence refresh (3 min)
+TICKER_MS  = 15 * 1000          # live price bar refresh (15 s — reads cache)
 
 PERIOD_OPTIONS = [
     {"label": "5 Days (1h)",   "value": "5d|1h"},
@@ -1302,17 +1306,10 @@ app.layout = html.Div([
     Input("ticker", "n_intervals"),
 )
 def update_live_price(_n):
-    try:
-        price = tv_feed.live_price()
-        try:
-            prev_df    = tv_feed.fetch_candles("1d", 2)
-            prev_close = float(prev_df["Close"].iloc[-2]) if len(prev_df) >= 2 else None
-        except Exception:
-            prev_close = None
-        return build_live_price_bar(price, prev_close=prev_close, source="tv")
-    except Exception as exc:
-        log.warning("Live price update failed: %s", exc)
+    p = _price_cache["price"]
+    if p is None:
         return build_live_price_bar()
+    return build_live_price_bar(p, prev_close=_price_cache.get("prev_close"), source="tv")
 
 
 @app.callback(
@@ -1380,6 +1377,15 @@ def render_tab(tab, _n, period_value):
         df_main, df_15m, df_1h, df_4h, df_1d, df_uup = fetch_all(period, interval)
         if df_main.empty or len(df_main) < 5:
             raise ValueError("No data returned — market may be closed.")
+
+        # Update price cache so the ticker doesn't need its own API call
+        try:
+            _price_cache["price"]      = float(df_main.iloc[-1]["Close"])
+            _price_cache["prev_close"] = float(df_1d.iloc[-2]["Close"]) \
+                                         if len(df_1d) >= 2 else None
+            _price_cache["ts"]         = datetime.now(timezone.utc)
+        except Exception:
+            pass
 
         score, direction, verdict, conf_results = compute_confluence(df_15m, df_1h, df_4h, df_uup)
         sigs = mtf_signals(df_15m, df_1h, df_4h, df_1d)

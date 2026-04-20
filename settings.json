@@ -1,0 +1,11 @@
+{
+  "trading_enabled": true,
+  "score_threshold": 3,
+  "max_positions": 2,
+  "max_daily_loss": 2.0,
+  "atr_sl_mult": 1.5,
+  "atr_tp_mult": 4.5,
+  "atr_sl_min": 0.3,
+  "atr_sl_max": 1.5,
+  "block_asian": true
+}
