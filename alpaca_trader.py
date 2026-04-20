@@ -20,9 +20,9 @@ log = logging.getLogger(__name__)
 PAPER_URL       = "https://paper-api.alpaca.markets"
 MAX_POSITIONS   = 2
 MAX_DAILY_LOSS  = 2.0   # %
-STOP_LOSS_PCT   = 0.8   # %
-TAKE_PROFIT_PCT = 1.6   # %
-SCORE_THRESHOLD = 4     # minimum score to actually execute
+STOP_LOSS_PCT   = 0.5   # %
+TAKE_PROFIT_PCT = 1.5   # %  (3:1 R:R)
+SCORE_THRESHOLD = 3     # minimum score to actually execute
 
 
 class AlpacaTrader:
@@ -112,7 +112,7 @@ class AlpacaTrader:
         """
         Evaluate all conditions and place an order if everything passes.
         Returns (status_message: str, order_id: str | None).
-        Score 3 = log only; score 4-5 = execute.
+        Score 2 = log only; score 3-5 = execute.
         """
         if not self.enabled:
             return "Alpaca keys not set — trading disabled", None
@@ -122,14 +122,14 @@ class AlpacaTrader:
         if v_direction not in ("BUY", "SELL"):
             return "Neutral — no trade", None
 
-        if score < 3:
+        if score < 2:
             return f"Score {score}/5 — below threshold", None
 
-        if score == 3:
-            log.info("Score 3/5: signal logged, not executed")
-            return "Score 3/5: signal noted — below execution threshold", None
+        if score == 2:
+            log.info("Score 2/5: signal logged, not executed")
+            return "Score 2/5: signal noted — below execution threshold", None
 
-        # score >= 4 from here — execute
+        # score >= 3 from here — execute
         if session == "Asian":
             return "Skipped: Asian session (low liquidity)", None
 
